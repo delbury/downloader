@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import iconv from 'iconv-lite';
 import path from "path";
 import { Config } from '~src/interface'
+import cliProgress from 'cli-progress';
 
 const URL_INFO = "https://www.bqxs520.com";
 const URL_CONTENT = "https://txt.yqkfqrc.com";
@@ -130,13 +131,13 @@ const resolveContent = (content: string) => {
 };
 
 // get one chapter content
-const getOneChapter = async (cid: string | number) => {
+const getOneChapter = async (cid: string | number, title?: string) => {
   const token = CryptoJS.HmacMD5(cid.toString(), USER_AGENT).toString();
   const secret = await getSecret(token, cid);
   const contentBuffer = await getContent(token, secret);
   const contentString = bufferToString(contentBuffer);
   const resolvedContentString = resolveContent(contentString);
-  return resolvedContentString
+  return title ? (title + '\n' + resolvedContentString) : resolvedContentString
 };
 
 // create dir if not exist
@@ -162,33 +163,54 @@ const saveAsFile = async (targetFile: string, content: string) => {
   await fs.writeFile(targetFile, content);
 };
 
+// clean special chars in title
+const cleanTitle = (title: string) => {
+  return title.replaceAll(/[^a-z0-9\u4e00-\u9fa5]/gi, '');
+}
+
 // func entry
 export async function main({ bqxs: config }: Config) {
   const targetDir = path.join(config.saveDir);
   await createDir(targetDir);
-  // const bookInfo = await getBookInfo(config);
-  // let retryCount = 0;
-  // for(let i = config.startIndex ?? 0, end = (config.endIndex ?? bookInfo.Chapters.length); i < end; i++) {
-  //   try {
-  //     const chapter = bookInfo.Chapters[i];
-  //     const content = await getOneChapter(chapter.ID);
-  //     const fileName = `No.${i.toString().padStart(4, '0')}.${chapter.Title}.txt`;
-  //     const targetFile = path.join(__dirname, config.saveDir, fileName);
 
-  //     if(await isExist(targetFile)) {
-  //       continue;
-  //     }
+  const bookInfo = await getBookInfo(config);
+  console.log(`fetch chapters of book : ${bookInfo.Title}, total: ${bookInfo.Chapters.length}`);
 
-  //     saveAsFile(targetFile, content);
-  //     retryCount = 0;
-  //   } catch (err) {
-  //     console.log(err);
-  //     retryCount++;
-  //     if(retryCount < 5) {
-  //       i--;
-  //     }
-  //   }
-  // }
-  await saveAsFile(path.join(targetDir, 'test-file.txt'), 'hello world');
-  
+  // show progress
+  const startIndex = config.startIndex ?? 0;
+  const endIndex = config.endIndex ?? bookInfo.Chapters.length - 1;
+  let currentCount = 0;
+  const progress = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+  progress.start(endIndex - startIndex + 1, 0);
+
+  let retryCount = 0;
+  const failedChapters: BookInfo['Chapters'] = [];
+  for(let i = startIndex; i < endIndex; i++) {
+    const chapter = bookInfo.Chapters[i];
+    try {
+      const content = await getOneChapter(chapter.ID, chapter.Title);
+      const fileName = `No.${(i + 1).toString().padStart(4, '0')}.${cleanTitle(chapter.Title)}.txt`;
+      const targetFile = path.join(targetDir, fileName);
+
+      if(await isExist(targetFile)) {
+        progress.update(++currentCount);
+        continue;
+      }
+
+      await saveAsFile(targetFile, content);
+      retryCount = 0;
+      progress.update(++currentCount);
+    } catch (err) {
+      console.log(err);
+      retryCount++;
+      if(retryCount < 5) {
+        i--;
+      } else {
+        failedChapters.push(chapter);
+      }
+    }
+  }
+  progress.stop();
+  console.log(`failed chapters: ${failedChapters.length}`);
+  console.log(failedChapters);
 }
